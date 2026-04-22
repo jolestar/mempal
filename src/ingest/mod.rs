@@ -5,6 +5,7 @@ pub mod detect;
 pub mod lock;
 pub mod normalize;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::core::{
@@ -209,6 +210,7 @@ pub async fn ingest_file_with_options<E: Embedder + ?Sized>(
     };
 
     let mut pending = Vec::new();
+    let mut pending_ids = HashSet::new();
 
     for (chunk_index, chunk) in chunks.iter().enumerate() {
         let drawer_id = build_drawer_id(wing, Some(resolved_room.as_str()), chunk);
@@ -219,6 +221,11 @@ pub async fn ingest_file_with_options<E: Embedder + ?Sized>(
                 source,
             })?
         {
+            stats.skipped += 1;
+            continue;
+        }
+
+        if !pending_ids.insert(drawer_id.clone()) {
             stats.skipped += 1;
             continue;
         }

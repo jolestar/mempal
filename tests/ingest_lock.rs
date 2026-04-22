@@ -259,6 +259,30 @@ fn test_double_check_after_lock_skips_duplicate() {
     assert_eq!(db.drawer_count().unwrap(), 1);
 }
 
+#[tokio::test]
+async fn test_single_ingest_skips_duplicate_chunks_with_same_drawer_id() {
+    let tmp = TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("palace.db");
+    Database::open(&db_path).expect("init db");
+
+    let content = r##"{"timestamp":"2026-04-22T00:00:00Z","type":"session_meta","payload":{"cwd":"/tmp/project"}}
+{"timestamp":"2026-04-22T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"same request"}]}}
+{"timestamp":"2026-04-22T00:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"same answer"}]}}
+{"timestamp":"2026-04-22T00:00:03Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"same request"}]}}
+{"timestamp":"2026-04-22T00:00:04Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"same answer"}]}}"##;
+    let file = write_file(tmp.path(), "duplicate-rollout.jsonl", content);
+    let db = Database::open(&db_path).expect("open");
+
+    let stats =
+        ingest_file_with_options(&db, &StubEmbedder, &file, "test", IngestOptions::default())
+            .await
+            .expect("ingest duplicate chunks");
+
+    assert_eq!(stats.chunks, 1, "only one unique drawer should be written");
+    assert_eq!(stats.skipped, 1, "duplicate chunk should be skipped");
+    assert_eq!(db.drawer_count().unwrap(), 1);
+}
+
 #[test]
 fn test_lock_released_on_guard_drop() {
     use mempal::ingest::lock::{acquire_source_lock, source_key};
