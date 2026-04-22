@@ -149,31 +149,25 @@ fn normalize_codex_jsonl(content: &str) -> Result<String> {
                 let Some(message) = payload.get("content").and_then(extract_content_text) else {
                     continue;
                 };
-                let message = message.trim();
-                if message.is_empty() {
+                let Some(message) = sanitize_codex_message(role, &message) else {
                     continue;
-                }
+                };
 
-                response_items.push((role.to_string(), message.to_string()));
+                response_items.push((role.to_string(), message));
             }
             "event_msg" => {
                 let msg_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
-                let message = payload
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim();
-                if message.is_empty() {
+                let message = payload.get("message").and_then(Value::as_str).unwrap_or("");
+                let role = match msg_type {
+                    "user_message" => "user",
+                    "agent_message" => "assistant",
+                    _ => continue,
+                };
+                let Some(message) = sanitize_codex_message(role, message) else {
                     continue;
-                }
+                };
 
-                match msg_type {
-                    "user_message" => legacy_events.push(("user".to_string(), message.to_string())),
-                    "agent_message" => {
-                        legacy_events.push(("assistant".to_string(), message.to_string()))
-                    }
-                    _ => {}
-                }
+                legacy_events.push((role.to_string(), message));
             }
             _ => {}
         }
@@ -184,6 +178,48 @@ fn normalize_codex_jsonl(content: &str) -> Result<String> {
     }
 
     Ok(render_transcript(legacy_events))
+}
+
+fn sanitize_codex_message(role: &str, message: &str) -> Option<String> {
+    let sanitized = if role == "user" {
+        strip_codex_user_preamble(message)
+    } else {
+        message.trim().to_string()
+    };
+
+    if sanitized.is_empty() {
+        None
+    } else {
+        Some(sanitized)
+    }
+}
+
+fn strip_codex_user_preamble(message: &str) -> String {
+    let mut remaining = message.trim_start();
+
+    loop {
+        let next = if remaining.starts_with("# AGENTS.md instructions for ") {
+            strip_prefix_through(remaining, "</INSTRUCTIONS>")
+        } else if remaining.starts_with("<INSTRUCTIONS>") {
+            strip_prefix_through(remaining, "</INSTRUCTIONS>")
+        } else if remaining.starts_with("<environment_context>") {
+            strip_prefix_through(remaining, "</environment_context>")
+        } else {
+            None
+        };
+
+        let Some(rest) = next else {
+            break;
+        };
+        remaining = rest.trim_start();
+    }
+
+    remaining.trim().to_string()
+}
+
+fn strip_prefix_through<'a>(message: &'a str, end_marker: &str) -> Option<&'a str> {
+    let end = message.find(end_marker)?;
+    Some(&message[end + end_marker.len()..])
 }
 
 fn normalize_slack_json(content: &str) -> Result<String> {
@@ -269,5 +305,28 @@ mod tests {
 
         let normalized = normalize_codex_jsonl(content).expect("normalize codex");
         assert_eq!(normalized, "> legacy hello\nlegacy hi");
+    }
+
+    #[test]
+    fn codex_normalize_strips_agents_and_environment_preamble() {
+        let content = r##"{"timestamp":"2026-04-19T10:37:36.000Z","type":"session_meta","payload":{"cwd":"/tmp/project"}}
+{"timestamp":"2026-04-19T10:37:36.100Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /tmp/project\n\n<INSTRUCTIONS>\nrepo rules\n--- project-doc ---\nproject rules\n</INSTRUCTIONS>"},{"type":"input_text","text":"<environment_context>\n  <cwd>/tmp/project</cwd>\n  <shell>zsh</shell>\n</environment_context>"},{"type":"input_text","text":"整理一下 mempal 的本地版本"}]}}
+{"timestamp":"2026-04-19T10:37:36.200Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"我会先改 normalize。"}]}}"##;
+
+        let normalized = normalize_codex_jsonl(content).expect("normalize codex");
+        assert_eq!(
+            normalized,
+            "> 整理一下 mempal 的本地版本\n我会先改 normalize。"
+        );
+    }
+
+    #[test]
+    fn codex_normalize_drops_user_turn_with_only_runtime_preamble() {
+        let content = r##"{"timestamp":"2026-04-19T10:37:36.000Z","type":"session_meta","payload":{"cwd":"/tmp/project"}}
+{"timestamp":"2026-04-19T10:37:36.100Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/tmp/project</cwd>\n</environment_context>"}]}}
+{"timestamp":"2026-04-19T10:37:36.200Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ready"}]}}"##;
+
+        let normalized = normalize_codex_jsonl(content).expect("normalize codex");
+        assert_eq!(normalized, "ready");
     }
 }
